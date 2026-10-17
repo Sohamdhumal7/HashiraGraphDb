@@ -190,17 +190,18 @@ python check_config.py
 streamlit run app.py
 ```
 
-The last default offline run reported 39 tests: 38 passed and the opt-in live test was skipped. The targeted missing-config test passed separately, and `compileall` completed successfully. A live Streamlit `AppTest` rendered the dashboard and exercised the Payment API simulator with no app exceptions. The live seed and three simulator scenarios above were separately run against Cloud. No benchmark was collected.
+The default offline run reports 43 tests (38 passed, 5 opt-in live tests skipped). The targeted missing-config test passed separately, and `compileall` completed successfully. A live Streamlit `AppTest` rendered the dashboard and exercised the Payment API simulator with no app exceptions. The live seed, simulator scenarios, and live persistent memory tests were run against Cloud.
 
-To run the optional live comparison test against the seeded `hashira_demo` graph in PowerShell:
+To run the live integration tests (both failure simulation and persistent memory writes/recall) against the seeded `hashira_demo` graph in PowerShell:
 
 ```powershell
 $env:HASHIRAGRAPH_LIVE_TEST = "1"
-python -m unittest tests.test_simulation_live -v
+python -m unittest tests.test_simulation_live tests.test_memory_live -v
 Remove-Item Env:HASHIRAGRAPH_LIVE_TEST
 ```
 
-It reads live dependency edges, compares the simulator's classifications with an independent Python BFS, and checks before/after counts. Without the opt-in variable, the live test is skipped and the default suite remains offline.
+- `tests.test_simulation_live`: reads live dependency edges, compares simulator classifications with an independent Python BFS oracle, and verifies counts remain unchanged.
+- `tests.test_memory_live`: verifies live `MemoryEpisode` writes, canonical service linking (`(m)-[:MENTIONS]->(s:Service)`), tenant isolation against other tenants, idempotency preservation (`MERGE ... ON CREATE SET`), and end-to-end `ActionAgent` session recall against FalkorDB Cloud. Test episodes are safely torn down after validation.
 
 ## Three tracks and blog side prize
 
