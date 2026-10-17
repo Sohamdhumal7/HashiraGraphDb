@@ -1,0 +1,6 @@
+FalkorDB>=1.0.0
+python-dotenv>=1.0.1
+google-genai>=1.0.0
+streamlit>=1.40.0
+streamlit-agraph>=0.0.45
+pytest>=8.0.0
