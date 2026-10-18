@@ -346,6 +346,7 @@ def generate_topology_html(edges: list[dict[str, str]], title: str = "HashiraGra
   <div class="toolbar-actions">
     <button class="btn" onclick="network.fit()">Fit View</button>
     <button class="btn" onclick="togglePhysics()">Toggle Physics</button>
+    <button class="btn" onclick="openFullscreenWindow()">Open in Separate Window</button>
   </div>
 </div>
 <div id="mynetwork"></div>
@@ -376,10 +377,78 @@ def generate_topology_html(edges: list[dict[str, str]], title: str = "HashiraGra
     physicsEnabled = !physicsEnabled;
     network.setOptions({{ physics: {{ enabled: physicsEnabled }} }});
   }}
+  function openFullscreenWindow() {{
+    try {{
+      const fullHtml = '<!DOCTYPE html>' + document.documentElement.outerHTML;
+      const blob = new Blob([fullHtml], {{ type: 'text/html;charset=utf-8' }});
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+    }} catch(e) {{
+      console.error(e);
+    }}
+  }}
 </script>
 </body>
 </html>"""
     return html_code
+
+
+def render_open_tab_button(html_content: str):
+    """Render a reliable 'Open in Separate Window / Tab' button using a Blob URL."""
+    b64 = base64.b64encode(html_content.encode("utf-8")).decode("ascii")
+    button_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body {{ margin: 0; padding: 0; background: transparent; overflow: hidden; }}
+  .btn-open {{
+    display: inline-block;
+    padding: 6px 12px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    color: #1d4ed8;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 4px;
+    cursor: pointer;
+    line-height: 1.4;
+    text-align: center;
+  }}
+  .btn-open:hover {{
+    background: #dbeafe;
+  }}
+</style>
+</head>
+<body>
+<button class="btn-open" onclick="openTab()">Open in Separate Window / Tab</button>
+<script>
+  function openTab() {{
+    try {{
+      const b64Data = "{b64}";
+      const binary = atob(b64Data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {{
+        bytes[i] = binary.charCodeAt(i);
+      }}
+      const blob = new Blob([bytes], {{ type: "text/html;charset=utf-8" }});
+      const url = URL.createObjectURL(blob);
+      const win = window.open(url, "_blank");
+      if (!win) {{
+        const win2 = window.open("", "_blank");
+        if (win2) {{
+          win2.document.write(new TextDecoder().decode(bytes));
+          win2.document.close();
+        }}
+      }}
+    }} catch(e) {{
+      console.error(e);
+    }}
+  }}
+</script>
+</body>
+</html>"""
+    components.html(button_html, height=36, scrolling=False)
 
 
 @st.dialog("Graph Topology Viewer", width="large")
@@ -393,15 +462,10 @@ def show_topology_modal(edges: list[dict[str, str]], title: str = "Graph Topolog
     st.caption(f"{len(node_set)} entities, {len(edges)} directed relationship links.")
 
     html = generate_topology_html(edges, title)
-    b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
-    data_uri = f"data:text/html;base64,{b64}"
 
     col_btn1, col_btn2 = st.columns([1, 1])
     with col_btn1:
-        st.markdown(
-            f'<a href="{data_uri}" target="_blank" style="display: inline-block; padding: 0.375rem 0.75rem; font-size: 0.8125rem; font-weight: 500; text-decoration: none; color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 4px;">Open in Separate Window / Tab</a>',
-            unsafe_allow_html=True,
-        )
+        render_open_tab_button(html)
     with col_btn2:
         st.download_button(
             "Download Standalone HTML",
@@ -935,12 +999,7 @@ with col_agent:
                 if st.button("View in Popup Modal", key="btn_view_modal", type="primary"):
                     show_topology_modal(edges, f"HashiraGraph - {tenant_id}")
             with col_act2:
-                st.markdown(
-                    f'<div style="margin-top: 3px;">'
-                    f'<a href="{data_uri}" target="_blank" style="display: inline-block; padding: 0.35rem 0.75rem; font-size: 0.8125rem; font-weight: 500; text-decoration: none; color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 4px;">Open in Separate Window / Tab</a>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+                render_open_tab_button(html)
             with col_act3:
                 st.download_button(
                     "Export HTML",
