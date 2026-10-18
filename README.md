@@ -11,7 +11,6 @@
 **Team Name:** hashira  
 **Team Code:** N6F3C3  
 **Repository:** [https://github.com/Sohamdhumal7/HashiraGraphDb](https://github.com/Sohamdhumal7/HashiraGraphDb)  
-**Demo Video:** [https://youtu.be/your-demo-video-id](https://youtu.be/your-demo-video-id) *(Update with your YouTube video URL)*  
 
 ---
 
@@ -27,11 +26,10 @@
 - [H. Complete Local Installation Instructions](#h-complete-local-installation-instructions)
 - [I. Environment Variables and Security](#i-environment-variables-and-security)
 - [J. Usage Guide](#j-usage-guide)
-- [K. Demo Video](#k-demo-video)
-- [L. Hackathon Tracks](#l-hackathon-tracks)
-- [M. AI Assistance Disclosure](#m-ai-assistance-disclosure)
-- [N. Limitations and Roadmap](#n-limitations-and-roadmap)
-- [O. Contributing and License](#o-contributing-and-license)
+- [K. Hackathon Tracks](#k-hackathon-tracks)
+- [L. AI Assistance Disclosure](#l-ai-assistance-disclosure)
+- [M. Limitations and Roadmap](#m-limitations-and-roadmap)
+- [N. Contributing and License](#n-contributing-and-license)
 
 ---
 
@@ -524,24 +522,7 @@ Use the chat interface to ask questions in plain English or click the prompt chi
 
 ---
 
-## K. Demo Video
-
-**Demo Walkthrough Link:** [https://youtu.be/your-demo-video-id](https://youtu.be/your-demo-video-id) *(Replace with actual link)*
-
-### Video Structure (3:30 Runtime):
-- **0:00–0:25:** Introduction to HashiraGraph, the problem of microservice opacity, and live FalkorDB health metrics.
-- **0:25–0:50:** Inspecting the interactive Vis.js graph topology (services, teams, dependencies, and ADRs).
-- **0:50–1:25:** Knowledge Agent in action: Asking who owns `Payment API`, reviewing the Cypher plan, and inspecting the grounding check.
-- **1:25–2:00:** Counterfactual What-If Failure Simulator: Simulating `Payment API` failure, showing `DOWN` vs `DEGRADED` propagation.
-- **2:00–2:20:** Generating a live Gemini SRE Incident Playbook directly from the simulation results.
-- **2:20–2:45:** System Fragility Ranking powered by FalkorDB's `algo.betweenness`.
-- **2:45–3:10:** Persistent cross-session memory: Storing a project note, recalling it across sessions, and inspecting the episode node in FalkorDB.
-- **3:10–3:25:** Curator Agent self-healing maintenance and auditable rollups.
-- **3:25–3:30:** Closing summary of hackathon track alignment and architectural safeguards.
-
----
-
-## L. Hackathon Tracks
+## K. Hackathon Tracks
 
 HashiraGraph is submitted to all three official tracks of Graph Hacks 2026:
 
@@ -560,7 +541,7 @@ HashiraGraph is submitted to all three official tracks of Graph Hacks 2026:
 
 ---
 
-## M. AI Assistance Disclosure
+## L. AI Assistance Disclosure
 
 In compliance with the official Graph Hacks 2026 rules:
 - **AI Coding Assistants Used:** Google Antigravity IDE and Google Gemini were used during development for code editing assistance, test drafting, and documentation formatting.
@@ -568,7 +549,7 @@ In compliance with the official Graph Hacks 2026 rules:
 
 ---
 
-## N. Limitations and Roadmap
+## M. Limitations and Roadmap
 
 ### Current Limitations
 - **Fixed Demo Tenants:** The current demo uses an allowlist (`hashira_demo`, `demo_acme`) rather than dynamic multi-tenant enterprise IAM/SSO authentication.
@@ -584,7 +565,7 @@ In compliance with the official Graph Hacks 2026 rules:
 
 ---
 
-## O. Contributing and License
+## N. Contributing and License
 
 ### Contributing
 Contributions, issue reports, and pull requests are welcome:
