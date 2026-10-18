@@ -181,7 +181,8 @@ def interpret_intent(question: str) -> tuple[dict[str, str], str | None]:
     try:
         from google import genai
         client = genai.Client(api_key=api_key)
-        model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+        raw_model = os.getenv("GEMINI_MODEL", "").strip()
+        model = "gemini-2.5-flash" if (not raw_model or raw_model == "gemini-3.8-flash") else raw_model
         response = client.models.generate_content(
             model=model,
             contents=(
@@ -329,9 +330,10 @@ def compose_answer(question: str, evidence: list[dict[str, Any]], *, fast: bool 
 
     try:
         from google import genai
-        client = genai.Client(api_key=key)
+        raw_model = os.getenv("GEMINI_MODEL", "").strip()
+        ans_model = "gemini-2.5-flash" if (not raw_model or raw_model == "gemini-3.8-flash") else raw_model
         response = client.models.generate_content(
-            model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
+            model=ans_model,
             contents=("Answer using only the supplied graph evidence. Say when it is incomplete. Do not add facts. "
                       "Return JSON only with fields answer (string) and evidence_indices (array of integer row indices used). "
                       "Cite at least one valid index. "
