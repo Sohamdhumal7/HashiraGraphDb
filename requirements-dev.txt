@@ -1,0 +1,2 @@
+-r requirements.txt
+falkordblite>=0.10.0  # embedded FalkorDB for integration tests (Linux/macOS/WSL)

@@ -10,8 +10,10 @@ from typing import Any
 
 from graph_store import DEMO_TENANTS, query_rows
 from seed_graph import BLAST_RADIUS_QUERY, run_blast_radius_query
+from simulation import PATH_QUERY, simulate_failure
+from verification import verify_answer
 
-TOOLS = {"blast_radius", "ownership", "incidents", "decisions", "memories"}
+TOOLS = {"blast_radius", "ownership", "incidents", "decisions", "memories", "simulate"}
 
 
 def authorize_tenant(requested_tenant: str, allowed_tenants: set[str]) -> str:
@@ -84,27 +86,39 @@ def extract_note(text: str) -> str:
     return cleaned
 
 
+SERVICE_NAMES = ("Web Checkout", "Checkout API", "Payment API", "Notification Service", "Fraud Service", "Ledger Service", "Identity Service")
+
+
 def heuristic_plan(question: str) -> dict[str, str]:
     q = question.lower()
-    service = next((name for name in ("Web Checkout", "Checkout API", "Payment API", "Notification Service", "Fraud Service", "Ledger Service", "Identity Service") if name.lower() in q), "")
-    memory_cues = ("remember", "recall", "what did i tell", "what have i told", "what do we know", "what do you know", "saved note", "previous conversation", "previous session", "history", "memory", "this session", "current session", "just said", "just asked")
+    found = [name for name in SERVICE_NAMES if name.lower() in q]
+    service = found[0] if found else ""
+    note_cues = ("what did i tell", "what have i told", "saved note", "my note", "my notes")
+    sim_recall_cues = ("what did we simulate", "earlier simulation", "previous simulation", "past simulation")
+    memory_cues = ("remember", "recall", "what do we know", "what do you know", "previous conversation", "previous session",
+                   "history", "memory", "this session", "current session", "just said", "just ask") + note_cues + sim_recall_cues
     if any(cue in q for cue in memory_cues):
-        session_id = "current" if any(phrase in q for phrase in ("this session", "current session", "just said", "just asked")) else ""
-        return {"tool": "memories", "service": service, "session_id": session_id}
-    if any(word in q for word in ("fail", "blast", "depend", "affected", "impact")):
-        return {"tool": "blast_radius", "service": service or "Payment API", "session_id": ""}
+        session_id = "current" if any(phrase in q for phrase in ("this session", "current session", "just said", "just ask")) else ""
+        kind = "simulation" if any(c in q for c in sim_recall_cues) else ("user_note" if any(c in q for c in note_cues) else "")
+        return {"tool": "memories", "service": service, "session_id": session_id, "kind": kind}
+    if any(cue in q for cue in ("simulate", "simulation", "what if", "what happens if")):
+        return {"tool": "simulate", "service": "|".join(found), "session_id": ""}
+    # Specific record types win over the generic blast-radius cues: "Which incidents
+    # affected Payment API?" is an incident lookup, not a dependency traversal.
     if "incident" in q or "outage" in q:
         return {"tool": "incidents", "service": service, "session_id": ""}
     if any(word in q for word in ("decision", "adr", "architecture")):
         return {"tool": "decisions", "service": service, "session_id": ""}
+    if any(word in q for word in ("fail", "blast", "depend", "affected", "impact")):
+        return {"tool": "blast_radius", "service": service or "Payment API", "session_id": ""}
     return {"tool": "ownership", "service": service or question.strip(), "session_id": ""}
 
 
 def interpret_intent(question: str) -> tuple[dict[str, str], str | None]:
     """Ask Gemini for a constrained tool choice; use deterministic intent on failure."""
     deterministic = heuristic_plan(question)
-    if deterministic["tool"] == "memories":
-        return deterministic, "Used deterministic memory routing; model output cannot change memory scope."
+    if deterministic["tool"] in ("memories", "simulate"):
+        return deterministic, "Used deterministic routing; model output cannot change memory scope or simulation targets."
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         return heuristic_plan(question), "Gemini not configured; used deterministic intent selection."
@@ -147,11 +161,19 @@ def run_tool(graph: Any, plan: dict[str, str]) -> tuple[list[dict[str, Any]], st
         query = BLAST_RADIUS_QUERY
         rows = run_blast_radius_query(graph, service)
         return ([{"service": r[0], "owner": r[1], "nodes": r[2], "edges": r[3]} for r in rows], query, "blast_radius")
+    if tool == "simulate":
+        report = simulate_failure(graph, [n for n in service.split("|") if n])
+        rows = []
+        for item in report["affected"]:
+            rows.append({"service": item["service"], "status": item["status"], "criticality": item["criticality"],
+                         "owners": item["owners"], "hops": item["hops"], "failed_target": item["failed_target"],
+                         "nodes": item["path"], "edges": [f"DEPENDS_ON ({m})" for m in item["modes"]]})
+        return (rows, PATH_QUERY.strip(), "simulate")
     specs = {
         "ownership": ("MATCH (t:Team)-[r:OWNS]->(s:Service {name:$name}) WHERE r.status IS NULL OR r.status='active' RETURN t.name,s.name,type(r)", ["team", "service", "relationship"]),
         "incidents": ("MATCH (i:Incident)-[r:AFFECTED_BY]->(s:Service) WHERE ($name='' OR s.name=$name) RETURN i.id,i.title,i.severity,i.status,s.name,type(r) ORDER BY i.id", ["id", "title", "severity", "status", "service", "relationship"]),
         "decisions": ("MATCH (a:ArchitectureDecision)-[r:GOVERNS]->(s:Service) WHERE ($name='' OR s.name=$name) RETURN a.id,a.title,a.status,a.rationale,s.name,type(r) ORDER BY a.id", ["id", "title", "status", "rationale", "service", "relationship"]),
-        "memories": ("MATCH (m:MemoryEpisode) WHERE m.tenant_id=$tenant AND ($session='' OR m.session_id=$session) "
+        "memories": ("MATCH (m:MemoryEpisode) WHERE m.tenant_id=$tenant AND ($session='' OR m.session_id=$session) AND (($kind='' AND coalesce(m.kind,'exchange')<>'recall') OR coalesce(m.kind,'exchange')=$kind) "
                      "OPTIONAL MATCH (m)-[:MENTIONS]->(s:Service) "
                      "WITH m, collect(DISTINCT s.name) AS services "
                      "WHERE $service='' OR $service IN services OR toLower(coalesce(m.user_message,'')) CONTAINS toLower($service) OR toLower(coalesce(m.summary,'')) CONTAINS toLower($service) "
@@ -159,7 +181,7 @@ def run_tool(graph: Any, plan: dict[str, str]) -> tuple[list[dict[str, Any]], st
                      "ORDER BY m.created_at DESC LIMIT 20", ["episode_id", "session_id", "created_at", "kind", "summary", "user_message", "source", "services"]),
     }
     query, keys = specs[tool]
-    params = {"name": service, "service": service, "tenant": plan.get("tenant_id", ""), "session": plan.get("session_id", "")}
+    params = {"name": service, "service": service, "tenant": plan.get("tenant_id", ""), "session": plan.get("session_id", ""), "kind": plan.get("kind", "")}
     rows = query_rows(graph, query, params, read_only=True)
     return ([dict(zip(keys, row)) for row in rows], query, tool)
 
@@ -181,6 +203,19 @@ def _format_deterministic_evidence(evidence: list[dict[str, Any]]) -> str:
                 lines.append(f"-{ts} \"{user_msg}\"")
             else:
                 lines.append(f"- {json.dumps(row, ensure_ascii=False)}")
+        return "\n".join(lines)
+    if evidence and "status" in evidence[0] and "nodes" in evidence[0]:
+        lines = ["Simulated impact (read-only; nothing was changed in the graph):"]
+        for r in evidence:
+            owners = ", ".join(r.get("owners") or []) or "unassigned"
+            hops = r.get("hops", "?")
+            lines.append(f"- {r['service']}: {r['status']} ({r.get('criticality') or 'unknown'}), owner: {owners}; "
+                         f"{hops} hop{'s' if hops != 1 else ''}: {' -> '.join(r['nodes'])}")
+        return "\n".join(lines)
+    if evidence and "owner" in evidence[0] and "nodes" in evidence[0]:
+        lines = ["Services that depend on the failed service (from FalkorDB paths):"]
+        for r in evidence:
+            lines.append(f"- {r['service']} (owner: {r.get('owner') or 'unassigned'}): {' -> '.join(r['nodes'])}")
         return "\n".join(lines)
     return "Graph evidence found:\n" + "\n".join(json.dumps(row, ensure_ascii=False) for row in evidence)
 
@@ -236,16 +271,16 @@ class ActionAgent:
 
         deterministic_plan = heuristic_plan(question)
         plan, intent_note = interpret_intent(question)
-        if deterministic_plan["tool"] == "memories":
+        if deterministic_plan["tool"] in ("memories", "simulate"):
             plan = deterministic_plan
-            intent_note = "Used deterministic memory routing; model output cannot change memory scope."
+            intent_note = "Used deterministic routing; model output cannot change memory scope or simulation targets."
         plan["tenant_id"] = self.tenant_id
 
         # Determine session scope:
         # If user explicitly specifies current session, use self.session_id.
         # Otherwise, keep session_id empty to allow cross-session memory recall for this tenant.
         q_lower = question.lower()
-        if any(phrase in q_lower for phrase in ("this session", "current session", "just said", "just asked")):
+        if any(phrase in q_lower for phrase in ("this session", "current session", "just said", "just ask")):
             plan["session_id"] = self.session_id
         else:
             plan["session_id"] = ""
@@ -253,12 +288,21 @@ class ActionAgent:
         try:
             evidence, query, tool = run_tool(self.graph, plan)
             answer, llm_note = compose_answer(question, evidence)
-            trace = {"tool": tool, "query": query, "rows": len(evidence), "episode_ids": [r["episode_id"] for r in evidence if r.get("episode_id")], "notes": [n for n in (intent_note, llm_note) if n]}
+            verification = verify_answer(answer, evidence)
+            if verification["status"] == "unsupported_claims":
+                answer = _format_deterministic_evidence(evidence)
+                llm_note = "Answer named entities missing from the evidence (" + ", ".join(verification["unsupported"]) + "); replaced with deterministic evidence."
+            trace = {"verification": verification, "tool": tool, "query": query, "rows": len(evidence), "episode_ids": [r["episode_id"] for r in evidence if r.get("episode_id")], "notes": [n for n in (intent_note, llm_note) if n]}
         except Exception as exc:
             answer, evidence, tool = f"The graph query did not complete: {type(exc).__name__}: {exc}", [], plan.get("tool", "unknown")
             trace = {"tool": tool, "query": None, "error": str(exc), "rows": 0, "episode_ids": [], "notes": [intent_note] if intent_note else []}
         try:
-            episode_id = persist_episode(self.graph, self.tenant_id, self.session_id, question, answer, evidence)
+            # Recall answers are logged (audit trail) but kept out of default recall, so
+            # memories do not recursively quote earlier memory answers.
+            kind = "exchange"
+            if not trace.get("error"):
+                kind = {"simulate": "simulation", "memories": "recall"}.get(tool, "exchange")
+            episode_id = persist_episode(self.graph, self.tenant_id, self.session_id, question, answer, evidence, kind=kind)
             trace["written_episode_ids"] = [episode_id]
         except Exception as exc:
             trace["memory_write_error"] = f"{type(exc).__name__}: {exc}"
@@ -274,7 +318,7 @@ def persist_episode(graph: Any, tenant_id: str, session_id: str, user_message: s
     The Action Agent owns conversation persistence. Streamlit only renders its
     result. Exact service links are added only for one unambiguous seeded name.
     """
-    if kind not in {"user_note", "exchange", "simulation"}:
+    if kind not in {"user_note", "exchange", "simulation", "recall"}:
         raise ValueError("Unsupported memory episode kind.")
     episode_id = episode_id or uuid.uuid4().hex
     from seed_graph import SERVICES
@@ -299,4 +343,3 @@ def persist_episode(graph: Any, tenant_id: str, session_id: str, user_message: s
     if rows[0][0] != episode_id:
         raise RuntimeError("Memory persistence returned an unexpected episode identifier.")
     return episode_id
-

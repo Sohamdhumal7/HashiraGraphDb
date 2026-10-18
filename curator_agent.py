@@ -68,7 +68,8 @@ def run_curator(graph: Any, tenant_id: str) -> dict[str, Any]:
         rollup_id = uuid.uuid4().hex
         made = query_rows(graph,
             "MERGE (s:MemoryRollup {tenant_id:$tenant, rollup_key:$key}) "
-            "ON CREATE SET s._curator_run_id=$run_id, s.episode_ids=$ids, s.source_count=size($ids), s.updated_at=$now "
+            "ON CREATE SET s._curator_run_id=$run_id "
+            "SET s.episode_ids=$ids, s.source_count=size($ids), s.updated_at=$now "
             "WITH s UNWIND $ids AS episode_id MATCH (m:MemoryEpisode {id:episode_id, tenant_id:$tenant}) "
             "MERGE (m)-[:INCLUDED_IN]->(s) RETURN s._curator_run_id=$run_id",
             {"tenant": tenant_id, "key": "recent_episodes_v1", "run_id": rollup_id, "ids": episode_ids,

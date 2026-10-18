@@ -34,7 +34,7 @@ graph LR
 
 Dependency direction is **dependent service → dependency**. `hard` means a dependency failure propagates `DOWN` through that edge. `soft` means the edge can cause `DEGRADED` but cannot alone establish `DOWN`. A missing or unknown mode is treated conservatively as soft. The four-hop simulator bound limits query work and is not a statement about graph completeness.
 
-`MemoryEpisode` records contain `id`, `tenant_id`, `session_id`, `created_at`, `kind`, `source`, `user_message`, `summary`, and evidence metadata. Kinds include `user_note`, `exchange`, and `simulation`. Conversation persistence has one owner: `ActionAgent`; the Streamlit callback only renders the result. Each new event gets a UUID. Retrying with a supplied ID uses `MERGE` with `ON CREATE SET`, preserving the original source, timestamp, and kind. Exact service names are linked to existing canonical service nodes only when one seeded name is unambiguous; memory retrieval still works for unlinked notes.
+`MemoryEpisode` records contain `id`, `tenant_id`, `session_id`, `created_at`, `kind`, `source`, `user_message`, `summary`, and evidence metadata. Kinds are `user_note`, `exchange`, `simulation`, and `recall`. Recall answers are logged for audit but excluded from default recall so memories never quote earlier memory answers; questions such as "What did I tell you..." search `user_note` only and "What did we simulate earlier?" searches `simulation` only. Conversation persistence has one owner: `ActionAgent`; the Streamlit callback only renders the result. Each new event gets a UUID. Retrying with a supplied ID uses `MERGE` with `ON CREATE SET`, preserving the original source, timestamp, and kind. Exact service names are linked to existing canonical service nodes only when one seeded name is unambiguous; memory retrieval still works for unlinked notes.
 
 Graph names are selected from a fixed demo allowlist (`hashira_demo`, `demo_acme`). Graph separation and the episode tenant property are demo safeguards, not production authentication or a formal cross-tenant security boundary.
 
@@ -85,6 +85,7 @@ Tenant/session-scoped memory recall uses:
 ```cypher
 MATCH (m:MemoryEpisode)
 WHERE m.tenant_id=$tenant AND ($session='' OR m.session_id=$session)
+  AND (($kind='' AND coalesce(m.kind,'exchange')<>'recall') OR coalesce(m.kind,'exchange')=$kind)
 OPTIONAL MATCH (m)-[:MENTIONS]->(s:Service)
 WITH m, collect(DISTINCT s.name) AS services
 WHERE $service='' OR $service IN services
@@ -121,6 +122,20 @@ The live seed and simulator were executed against `tenant_hashira_demo`. At veri
 | Fraud Service | Checkout API `DEGRADED` (Checkout Team), 1 soft hop; Web Checkout `DEGRADED` (Web Team), 2 hops (`hard → soft`) |
 
 The live graph counts were unchanged before and after each of these read-only simulations. Counts are snapshots, not a lock against unrelated concurrent writes.
+
+## Additional capabilities
+
+**Chat-driven what-if.** "Simulate failure of Ledger Service" or "What if Fraud Service and Payment API go down?" routes deterministically (the model cannot choose targets) to the same read-only simulator as the dashboard and returns DOWN/DEGRADED services with owners and the exact path. Each run is stored as a `simulation` episode that can be recalled in a later session.
+
+**Grounding check.** After every answer, `verification.verify_answer` checks that each named service, team, incident ID and decision ID in the answer appears in the retrieved evidence rows. If a model-written answer names something that was not retrieved, it is replaced by the deterministic evidence listing and the trace records why. This verifies named entities only; it is not a general semantic fact-checker.
+
+**Fragility ranking.** "Which service is most dangerous to lose?" counts, per service, the dependents that would go DOWN (all-hard paths, at most 4 hops) and DEGRADED, using the same semantics as the simulator, and orders by those counts, then criticality. It also shows FalkorDB's `algo.betweenness` (fixed sampling seed 42 when supported) as an approximate chokepoint hint; the server samples paths, so this column does not affect ordering and is not a risk probability. If the procedure is unavailable the ranking still works and says so.
+
+```cypher
+MATCH p = (a:Service)-[:DEPENDS_ON*1..4]->(f:Service)
+WHERE all(r IN relationships(p) WHERE r.mode = 'hard')
+RETURN f.name, collect(DISTINCT a.name)
+```
 
 ## Setup and configuration
 
@@ -180,28 +195,24 @@ The curator inspects schema and high-degree nodes, considers only explicitly ver
 
 ## Tests and commands
 
-From the repository root in PowerShell:
-
 ```powershell
-python -m unittest tests.test_graph_logic.GraphLogicTests.test_connection_missing_config_has_actionable_diagnostic -v
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -t . -v      # or: python -m pytest -q tests
 python -m compileall -q .
 python check_config.py
 streamlit run app.py
 ```
 
-The default offline run reports 43 tests (38 passed, 5 opt-in live tests skipped). The targeted missing-config test passed separately, and `compileall` completed successfully. A live Streamlit `AppTest` rendered the dashboard and exercised the Payment API simulator with no app exceptions. The live seed, simulator scenarios, and live persistent memory tests were run against Cloud.
+The suite has 88 tests that run by default (plus 5 opt-in live checks). Pure unit tests (configuration, intent parsing, citation validation, tenant authorization, error redaction) run anywhere. Integration tests run real Cypher on an embedded FalkorDB engine ([FalkorDBLite](https://pypi.org/project/falkordblite/), no Docker): seeding and idempotency, blast radius, every single and pair simulation checked against an independent Python path enumeration, hop bound, cycles, unknown modes, memory write/recall, tenant isolation, curator promotion/closure/rollups, fragility ranking, and a headless Streamlit run of the dashboard. Install `pip install -r requirements-dev.txt`; FalkorDBLite targets Linux/macOS, so on plain Windows these modules skip (use WSL to run them).
 
-To run the live integration tests (both failure simulation and persistent memory writes/recall) against the seeded `hashira_demo` graph in PowerShell:
+Opt-in live check against your Cloud instance. It writes only to a throwaway `tenant_ci_scratch_*` graph and deletes it:
 
 ```powershell
 $env:HASHIRAGRAPH_LIVE_TEST = "1"
-python -m unittest tests.test_simulation_live tests.test_memory_live -v
+python -m unittest tests.test_cloud_live -v
 Remove-Item Env:HASHIRAGRAPH_LIVE_TEST
 ```
 
-- `tests.test_simulation_live`: reads live dependency edges, compares simulator classifications with an independent Python BFS oracle, and verifies counts remain unchanged.
-- `tests.test_memory_live`: verifies live `MemoryEpisode` writes, canonical service linking (`(m)-[:MENTIONS]->(s:Service)`), tenant isolation against other tenants, idempotency preservation (`MERGE ... ON CREATE SET`), and end-to-end `ActionAgent` session recall against FalkorDB Cloud. Test episodes are safely torn down after validation.
+The embedded engine and FalkorDB Cloud may run different server versions. The live check prints whether `algo.betweenness` is available on your instance.
 
 ## Three tracks and blog side prize
 

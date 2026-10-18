@@ -11,9 +11,10 @@ from typing import Any
 
 import streamlit as st
 
-from action_agent import ActionAgent
+from action_agent import ActionAgent, persist_episode
 from curator_agent import run_curator
 from graph_store import close_client, connect_graph, graph_health, query_rows
+from insights import fragility_ranking
 from simulation import list_services, simulate_failure
 
 # -----------------------------------------------------------------------------
@@ -304,6 +305,9 @@ with col_chat:
                         f"Returned {trace.get('rows', 0)} row(s)."
                     )
                 st.code(trace.get("query") or "No direct query executed", language="cypher")
+                if trace.get("verification"):
+                    v = trace["verification"]
+                    st.caption(f"Grounding check: {v['status']}" + (f" - unsupported: {', '.join(v['unsupported'])}" if v.get("unsupported") else ""))
                 for note in trace.get("notes", []):
                     st.caption(f"• {note}")
 
@@ -396,6 +400,30 @@ with col_tools:
                         st.caption(f"Classification Model: {report['classification_model']}")
                         st.json(report["trace"])
 
+                report = st.session_state.get("simulation_report")
+                if report and st.session_state.get("simulation_tenant") == tenant_id:
+                    if st.button("Save this simulation to persistent memory", key=f"save_sim_{tenant_id}"):
+                        names = ", ".join(row["service"] for row in report["failed_targets"])
+                        summary = "; ".join(f"{a['service']} {a['status']}" for a in report["affected"]) or "no dependent services impacted"
+                        episode_id = persist_episode(graph, tenant_id, st.session_state.session_id,
+                                                     f"Simulated failure of {names}", f"Simulation result: {summary}",
+                                                     [{"service": a["service"], "status": a["status"]} for a in report["affected"]],
+                                                     source="What-If Simulator", kind="simulation")
+                        st.success(f"Saved simulation episode {episode_id[:8]}. Ask: 'What did we simulate earlier?'")
+
+                st.markdown("---")
+                st.markdown("##### Fragility Ranking")
+                st.caption("Which service is most dangerous to lose? Counts DOWN/DEGRADED dependents using the same hard/soft semantics, plus FalkorDB betweenness when available.")
+                if st.button("Compute fragility ranking", key=f"fragility_{tenant_id}"):
+                    st.session_state.fragility_report = fragility_ranking(graph)
+                    st.session_state.fragility_tenant = tenant_id
+                frag = st.session_state.get("fragility_report")
+                if frag and st.session_state.get("fragility_tenant") == tenant_id:
+                    st.dataframe([{"Service": r["service"], "Criticality": r["criticality"], "DOWN if lost": r["hard_dependents_down"],
+                                   "DEGRADED if lost": r["soft_dependents_degraded"], "Betweenness": r["betweenness"],
+                                   "Would go down": ", ".join(r["down_if_lost"]) or "-"} for r in frag["ranking"]],
+                                 width="stretch", hide_index=True)
+                    st.caption(f"{frag['method']} Algorithm status: {frag['algorithm_status']}.")
             except Exception as exc:
                 st.error(f"Simulator error: {type(exc).__name__}: {exc}")
         else:
