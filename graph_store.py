@@ -102,11 +102,23 @@ def load_configuration(env_file: str | Path | None = None, *, environ: MutableMa
         except Exception as exc:
             raise GraphConfigurationError(f"Could not read configuration file {path}: {type(exc).__name__}.") from exc
 
+    st_secrets: dict[str, str] = {}
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets"):
+            for k in CONFIG_KEYS:
+                if k in st.secrets and str(st.secrets[k]).strip():
+                    st_secrets[k] = str(st.secrets[k])
+    except Exception:
+        pass
+
     merged: dict[str, str] = {}
     for key in CONFIG_KEYS:
         external = environment.get(key)
         if external is not None and external.strip():
             merged[key] = external
+        elif key in st_secrets:
+            merged[key] = st_secrets[key]
         else:
             merged[key] = file_values.get(key, external or "")
     if apply_to_environment and isinstance(environment, MutableMapping):
