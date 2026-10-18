@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os, tempfile, uuid
 try:
+    # pyrefly: ignore[missing-import]
     from redislite.falkordb_client import FalkorDB
     AVAILABLE = True
 except Exception:  # FalkorDBLite targets Linux/macOS; on plain Windows these tests skip

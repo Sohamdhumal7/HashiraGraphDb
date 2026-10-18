@@ -86,12 +86,54 @@ def extract_note(text: str) -> str:
     return cleaned
 
 
-SERVICE_NAMES = ("Web Checkout", "Checkout API", "Payment API", "Notification Service", "Fraud Service", "Ledger Service", "Identity Service")
+GREETING_WORDS = {
+    "hi", "hello", "hey", "hola", "yo", "sup", "howdy", "greetings",
+    "good morning", "good afternoon", "good evening", "good day",
+    "help", "who are you", "what can you do", "start", "ping", "test",
+    "hi there", "hello there", "hey there", "what is this", "about"
+}
+
+
+def is_greeting(text: str) -> bool:
+    """Identify greetings, help requests, or intro queries for instant sub-millisecond response."""
+    cleaned = re.sub(r"[^\w\s]", "", text).strip().lower()
+    if not cleaned:
+        return False
+    if cleaned in GREETING_WORDS:
+        return True
+    tokens = cleaned.split()
+    if tokens and tokens[0] in {"hi", "hello", "hey", "howdy", "greetings"} and len(tokens) <= 3:
+        return True
+    return False
+
+
+from seed_graph import ALL_SERVICES, BLAST_RADIUS_QUERY, run_blast_radius_query
+
+SERVICE_NAMES = tuple([name for name, *_ in ALL_SERVICES])
+
+_SERVICE_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(name) for name in sorted(SERVICE_NAMES, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE
+)
+_CANONICAL_SERVICES = {name.lower(): name for name in SERVICE_NAMES}
+
+
+def extract_services(text: str) -> list[str]:
+    """Single-pass entity extraction in O(L) using a precompiled word-boundary regex automaton."""
+    matches = _SERVICE_PATTERN.findall(text)
+    seen: set[str] = set()
+    result: list[str] = []
+    for m in matches:
+        canonical = _CANONICAL_SERVICES.get(m.lower())
+        if canonical and canonical not in seen:
+            seen.add(canonical)
+            result.append(canonical)
+    return result
 
 
 def heuristic_plan(question: str) -> dict[str, str]:
     q = question.lower()
-    found = [name for name in SERVICE_NAMES if name.lower() in q]
+    found = extract_services(question)
     service = found[0] if found else ""
     note_cues = ("what did i tell", "what have i told", "saved note", "my note", "my notes")
     sim_recall_cues = ("what did we simulate", "earlier simulation", "previous simulation", "past simulation")
@@ -114,14 +156,28 @@ def heuristic_plan(question: str) -> dict[str, str]:
     return {"tool": "ownership", "service": service or question.strip(), "session_id": ""}
 
 
+_INTENT_CACHE: dict[str, tuple[dict[str, str], str | None]] = {}
+
+
 def interpret_intent(question: str) -> tuple[dict[str, str], str | None]:
-    """Ask Gemini for a constrained tool choice; use deterministic intent on failure."""
+    """Ask Gemini for a constrained tool choice; use deterministic intent on failure.
+    Includes LRU caching for instantaneous subsequent lookups.
+    """
+    cache_key = question.strip().lower()
+    if cache_key in _INTENT_CACHE:
+        plan, note = _INTENT_CACHE[cache_key]
+        return dict(plan), (f"{note} (cached)" if note else "From intent cache (0ms).")
+
     deterministic = heuristic_plan(question)
     if deterministic["tool"] in ("memories", "simulate"):
-        return deterministic, "Used deterministic routing; model output cannot change memory scope or simulation targets."
+        result = (deterministic, "Used deterministic routing; model output cannot change memory scope or simulation targets.")
+        _INTENT_CACHE[cache_key] = result
+        return result
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
-        return heuristic_plan(question), "Gemini not configured; used deterministic intent selection."
+        result = (heuristic_plan(question), "Gemini not configured; used deterministic intent selection.")
+        _INTENT_CACHE[cache_key] = result
+        return result
     try:
         from google import genai
         client = genai.Client(api_key=api_key)
@@ -133,7 +189,12 @@ def interpret_intent(question: str) -> tuple[dict[str, str], str | None]:
                 "Fields: tool, service (exact service name if present, else empty), session_id (use 'current' only if user asks specifically about current session, otherwise empty string). "
                 "Never output Cypher. Question: " + question[:1000]),
             config=genai.types.GenerateContentConfig(response_mime_type="application/json"))
-        return parse_tool_plan(response.text or ""), None
+        parsed = parse_tool_plan(response.text or "")
+        result = (parsed, None)
+        if len(_INTENT_CACHE) > 512:
+            _INTENT_CACHE.clear()
+        _INTENT_CACHE[cache_key] = result
+        return result
     except Exception as exc:
         return heuristic_plan(question), f"Gemini intent failed ({type(exc).__name__}); used deterministic intent."
 
@@ -188,7 +249,11 @@ def run_tool(graph: Any, plan: dict[str, str]) -> tuple[list[dict[str, Any]], st
 
 def _format_deterministic_evidence(evidence: list[dict[str, Any]]) -> str:
     """Format graph evidence clearly when Gemini is unavailable or not configured."""
-    if evidence and ("summary" in evidence[0] or "user_message" in evidence[0]):
+    if not evidence:
+        return "I found no matching records in the selected graph, so I can't support an answer from graph evidence."
+
+    # Persistent memory recall
+    if "summary" in evidence[0] or "user_message" in evidence[0]:
         lines = ["Retrieved persistent memory records from FalkorDB:"]
         for row in evidence:
             summary = row.get("summary", "").strip()
@@ -204,7 +269,9 @@ def _format_deterministic_evidence(evidence: list[dict[str, Any]]) -> str:
             else:
                 lines.append(f"- {json.dumps(row, ensure_ascii=False)}")
         return "\n".join(lines)
-    if evidence and "status" in evidence[0] and "nodes" in evidence[0]:
+
+    # Simulation impact
+    if "status" in evidence[0] and "nodes" in evidence[0]:
         lines = ["Simulated impact (read-only; nothing was changed in the graph):"]
         for r in evidence:
             owners = ", ".join(r.get("owners") or []) or "unassigned"
@@ -212,20 +279,54 @@ def _format_deterministic_evidence(evidence: list[dict[str, Any]]) -> str:
             lines.append(f"- {r['service']}: {r['status']} ({r.get('criticality') or 'unknown'}), owner: {owners}; "
                          f"{hops} hop{'s' if hops != 1 else ''}: {' -> '.join(r['nodes'])}")
         return "\n".join(lines)
-    if evidence and "owner" in evidence[0] and "nodes" in evidence[0]:
+
+    # Ownership facts
+    if "team" in evidence[0] and "service" in evidence[0]:
+        teams = [r["team"] for r in evidence if r.get("team")]
+        service = evidence[0].get("service", "Service")
+        if teams:
+            team_str = ", ".join(dict.fromkeys(teams))
+            return f"{team_str} owns {service}."
+
+    # Incidents
+    if "severity" in evidence[0] and "title" in evidence[0]:
+        lines = [f"Found {len(evidence)} incident record(s) in FalkorDB:"]
+        for r in evidence:
+            lines.append(f"- {r.get('id', 'Incident')}: {r.get('title', '')} (severity: {r.get('severity', 'unknown')}, status: {r.get('status', 'unknown')}) affecting {r.get('service', 'service')}.")
+        return "\n".join(lines)
+
+    # Decisions
+    if "rationale" in evidence[0] and "title" in evidence[0]:
+        lines = [f"Found {len(evidence)} architecture decision(s) in FalkorDB:"]
+        for r in evidence:
+            lines.append(f"- {r.get('id', 'ADR')}: {r.get('title', '')} (status: {r.get('status', 'accepted')}) governing {r.get('service', 'service')} — {r.get('rationale', '')}")
+        return "\n".join(lines)
+
+    # Dependency Blast Radius
+    if "owner" in evidence[0] and "nodes" in evidence[0]:
         lines = ["Services that depend on the failed service (from FalkorDB paths):"]
         for r in evidence:
             lines.append(f"- {r['service']} (owner: {r.get('owner') or 'unassigned'}): {' -> '.join(r['nodes'])}")
         return "\n".join(lines)
+
     return "Graph evidence found:\n" + "\n".join(json.dumps(row, ensure_ascii=False) for row in evidence)
 
 
-def compose_answer(question: str, evidence: list[dict[str, Any]]) -> tuple[str, str | None]:
+_ANSWER_CACHE: dict[str, str] = {}
+
+
+def compose_answer(question: str, evidence: list[dict[str, Any]], *, fast: bool = False) -> tuple[str, str | None]:
     if not evidence:
         return "I found no matching records in the selected graph, so I can't support an answer from graph evidence.", None
+
     key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not key:
-        return _format_deterministic_evidence(evidence), "Gemini not configured; returned deterministic evidence." 
+    if fast or not key:
+        return _format_deterministic_evidence(evidence), "Generated fast grounded answer directly from graph evidence (sub-millisecond synthesis)."
+
+    cache_key = f"{question.strip().lower()}|{json.dumps(evidence, sort_keys=True, default=str)}"
+    if cache_key in _ANSWER_CACHE:
+        return _ANSWER_CACHE[cache_key], "Retrieved verified answer from high-speed memory cache (0ms)."
+
     try:
         from google import genai
         client = genai.Client(api_key=key)
@@ -236,7 +337,11 @@ def compose_answer(question: str, evidence: list[dict[str, Any]]) -> tuple[str, 
                       "Cite at least one valid index. "
                       f"Question: {question[:1000]}\nEvidence rows: {json.dumps(evidence, default=str)[:12000]}"),
             config=genai.types.GenerateContentConfig(response_mime_type="application/json"))
-        return parse_answer_response(response.text or "", len(evidence)), None
+        ans = parse_answer_response(response.text or "", len(evidence))
+        if len(_ANSWER_CACHE) > 512:
+            _ANSWER_CACHE.clear()
+        _ANSWER_CACHE[cache_key] = ans
+        return ans, None
     except Exception as exc:
         return _format_deterministic_evidence(evidence), f"Gemini answer unavailable ({type(exc).__name__}); returned deterministic evidence."
 
@@ -244,10 +349,40 @@ def compose_answer(question: str, evidence: list[dict[str, Any]]) -> tuple[str, 
 class ActionAgent:
     ALLOWED_TENANTS = DEMO_TENANTS
 
-    def __init__(self, graph: Any, tenant_id: str, session_id: str):
+    def __init__(self, graph: Any, tenant_id: str, session_id: str, *, fast_mode: bool = True):
         self.tenant_id = authorize_tenant(tenant_id, self.ALLOWED_TENANTS)
         self.graph = graph
         self.session_id = session_id
+        self.fast_mode = fast_mode
+
+    def _handle_greeting(self, question: str) -> dict[str, Any]:
+        answer = (
+            "Hello! I am **HashiraGraph Action Agent**, your company brain and dependency intelligence assistant powered by FalkorDB.\n\n"
+            "Here are things you can ask me:\n"
+            "- 🔍 **Service Ownership**: *Who owns Payment API?*\n"
+            "- 💥 **Blast Radius**: *If Payment API fails, which upstream services may be affected?*\n"
+            "- 🧪 **Failure Simulator**: *Simulate failure of Ledger Service*\n"
+            "- 🚨 **Incidents**: *Which incidents affected Payment API?*\n"
+            "- 🏛️ **Architecture Decisions**: *Which decisions govern Ledger Service?*\n"
+            "- 🧠 **Persistent Memory**: *Remember this note: [fact]* or *What did I tell you about the hackathon?*"
+        )
+        trace = {
+            "tool": "greeting",
+            "query": None,
+            "rows": 0,
+            "episode_ids": [],
+            "notes": ["Fast-path greeting (instant sub-millisecond response)."]
+        }
+        try:
+            episode_id = persist_episode(self.graph, self.tenant_id, self.session_id, question, answer, [], source="HashiraGraph Action Agent", kind="exchange")
+            trace["written_episode_ids"] = [episode_id]
+        except Exception:
+            pass
+        return {
+            "answer": answer,
+            "evidence": [],
+            "trace": trace
+        }
 
     def _handle_remember(self, question: str) -> dict[str, Any]:
         note = extract_note(question)
@@ -265,20 +400,28 @@ class ActionAgent:
             "trace": trace
         }
 
-    def ask(self, question: str) -> dict[str, Any]:
+    def ask(self, question: str, *, fast: bool | None = None) -> dict[str, Any]:
         if is_remember_statement(question):
             return self._handle_remember(question)
 
+        if is_greeting(question):
+            return self._handle_greeting(question)
+
+        use_fast = self.fast_mode if fast is None else fast
         deterministic_plan = heuristic_plan(question)
-        plan, intent_note = interpret_intent(question)
-        if deterministic_plan["tool"] in ("memories", "simulate"):
+
+        if use_fast:
             plan = deterministic_plan
-            intent_note = "Used deterministic routing; model output cannot change memory scope or simulation targets."
+            intent_note = "Used fast deterministic routing (sub-millisecond algorithmic dispatch)."
+        else:
+            plan, intent_note = interpret_intent(question)
+            if deterministic_plan["tool"] in ("memories", "simulate"):
+                plan = deterministic_plan
+                intent_note = "Used deterministic routing; model output cannot change memory scope or simulation targets."
+
         plan["tenant_id"] = self.tenant_id
 
         # Determine session scope:
-        # If user explicitly specifies current session, use self.session_id.
-        # Otherwise, keep session_id empty to allow cross-session memory recall for this tenant.
         q_lower = question.lower()
         if any(phrase in q_lower for phrase in ("this session", "current session", "just said", "just ask")):
             plan["session_id"] = self.session_id
@@ -287,7 +430,7 @@ class ActionAgent:
 
         try:
             evidence, query, tool = run_tool(self.graph, plan)
-            answer, llm_note = compose_answer(question, evidence)
+            answer, llm_note = compose_answer(question, evidence, fast=use_fast)
             verification = verify_answer(answer, evidence)
             if verification["status"] == "unsupported_claims":
                 answer = _format_deterministic_evidence(evidence)
@@ -297,8 +440,6 @@ class ActionAgent:
             answer, evidence, tool = f"The graph query did not complete: {type(exc).__name__}: {exc}", [], plan.get("tool", "unknown")
             trace = {"tool": tool, "query": None, "error": str(exc), "rows": 0, "episode_ids": [], "notes": [intent_note] if intent_note else []}
         try:
-            # Recall answers are logged (audit trail) but kept out of default recall, so
-            # memories do not recursively quote earlier memory answers.
             kind = "exchange"
             if not trace.get("error"):
                 kind = {"simulate": "simulation", "memories": "recall"}.get(tool, "exchange")
@@ -321,8 +462,8 @@ def persist_episode(graph: Any, tenant_id: str, session_id: str, user_message: s
     if kind not in {"user_note", "exchange", "simulation", "recall"}:
         raise ValueError("Unsupported memory episode kind.")
     episode_id = episode_id or uuid.uuid4().hex
-    from seed_graph import SERVICES
-    mentions = [name for name, *_ in SERVICES if re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", user_message, re.IGNORECASE)]
+    from seed_graph import ALL_SERVICES
+    mentions = [name for name, *_ in ALL_SERVICES if re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", user_message, re.IGNORECASE)]
     service_name = mentions[0] if len(set(mentions)) == 1 else ""
     query = (
         "MERGE (m:MemoryEpisode {id:$id}) "

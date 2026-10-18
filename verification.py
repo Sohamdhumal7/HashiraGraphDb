@@ -9,9 +9,9 @@ import json
 import re
 from typing import Any
 
-from seed_graph import SERVICES, TEAMS
+from seed_graph import ALL_SERVICES, ALL_TEAMS, SERVICES, TEAMS
 
-KNOWN_NAMES = tuple([name for name, *_ in SERVICES] + list(TEAMS))
+KNOWN_NAMES = tuple([name for name, *_ in ALL_SERVICES] + list(ALL_TEAMS))
 ID_PATTERN = re.compile(r"\b(?:INC|ADR)-\d+\b", re.IGNORECASE)
 
 
